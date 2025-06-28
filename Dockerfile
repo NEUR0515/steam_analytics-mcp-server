@@ -26,7 +26,41 @@ RUN npm run build
 # Remove dev dependencies
 RUN npm prune --production
 
-# Stage 2: Production stage
+# Stage 2: Development stage
+FROM node:18-alpine AS development
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S steam && \
+    adduser -S steam -u 1001 -G steam
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install all dependencies (including dev dependencies for development)
+RUN npm ci
+
+# Copy source code
+COPY src/ ./src/
+
+# Create logs directory
+RUN mkdir -p /app/logs && \
+    chown -R steam:steam /app
+
+# Switch to non-root user
+USER steam
+
+# Set environment variables
+ENV NODE_ENV=development
+ENV LOG_LEVEL=debug
+
+# Development command (will be overridden by docker-compose)
+CMD ["npm", "run", "dev"]
+
+# Stage 3: Production stage
 FROM node:18-alpine AS production
 
 # Create non-root user for security
@@ -62,9 +96,6 @@ ENV LOG_LEVEL=info
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD node -e "console.log('Health check passed')" || exit 1
 
-# Expose port (if your MCP server needs HTTP endpoints)
-# EXPOSE 3000
-
 # Default command
 CMD ["node", "dist/index.js"]
 
@@ -72,4 +103,3 @@ CMD ["node", "dist/index.js"]
 LABEL maintainer="PH4NT0MBYT3"
 LABEL description="Steam Analytics MCP Server"
 LABEL version="1.0.0"
-LABEL org.opencontainers.image.source="https://github.com/NEUR0515/steam-analytics-mcp-server"

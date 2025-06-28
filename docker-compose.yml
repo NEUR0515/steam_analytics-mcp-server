@@ -1,8 +1,6 @@
 # Docker Compose for MCP Server Stack
 # Orchestrates multiple MCP servers including Steam Analytics
 
-version: '3.8'
-
 services:
   # Steam Analytics MCP Server
   steam-mcp:

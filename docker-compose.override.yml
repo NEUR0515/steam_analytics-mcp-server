@@ -2,8 +2,6 @@
 # docker-compose.override.yml (Development overrides)
 # ================================
 
-version: '3.8'
-
 services:
   steam-mcp:
     build:
