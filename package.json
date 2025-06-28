@@ -1,0 +1,63 @@
+{
+  "name": "steam-analytics-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Steam API integration and gaming analytics",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx --watch src/index.ts",
+    "start": "node dist/index.js",
+    "lint": "eslint src/**/*.ts",
+    "test": "node tests/test-all.js",
+    "test:steam": "node tests/test-steam-api.js",
+    "test:mcp": "node tests/test-mcp-server.js",
+    "test:debug": "node tests/debug-test.js",
+    "test:simple": "node tests/simple-steam-test.js",
+    "test:nodejs": "node tests/nodejs-steam-test.js",
+    "test:simple-mcp": "node tests/simple-mcp-test.js",
+    
+    "docker:build": "docker build -t steam-mcp-server .",
+    "docker:run": "docker run --env-file .env.docker steam-mcp-server",
+    "docker:deploy": "./deploy.sh",
+    "docker:stop": "./stop.sh",
+    "docker:logs": "./logs.sh",
+    "docker:clean": "./clean.sh",
+    
+    "compose:up": "docker-compose --env-file .env.docker up -d",
+    "compose:down": "docker-compose --env-file .env.docker down",
+    "compose:logs": "docker-compose --env-file .env.docker logs -f",
+    "compose:restart": "docker-compose --env-file .env.docker restart",
+    
+    "deploy:dev": "./deploy.sh --env development",
+    "deploy:prod": "./deploy.sh --env production --monitoring",
+    "deploy:staging": "./deploy.sh --env staging"
+  },
+  "keywords": [
+    "steam",
+    "mcp",
+    "gaming",
+    "analytics",
+    "ai"
+  ],
+  "author": "N3UR0515",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.4.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.6.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.50.0",
+    "jest": "^29.7.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

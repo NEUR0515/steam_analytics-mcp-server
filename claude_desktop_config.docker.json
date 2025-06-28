@@ -1,0 +1,30 @@
+{
+    "mcpServers": {
+      "steam-analytics": {
+        "command": "docker",
+        "args": [
+          "exec",
+          "-i",
+          "steam-analytics-mcp",
+          "node",
+          "dist/index.js"
+        ],
+        "env": {
+          "NODE_ENV": "production"
+        }
+      },
+      "steam-analytics-compose": {
+        "command": "docker-compose",
+        "args": [
+          "--env-file",
+          ".env.docker",
+          "exec",
+          "-T",
+          "steam-mcp",
+          "node",
+          "dist/index.js"
+        ],
+        "cwd": "C:/Users/alfie/Documents/REPOS/steam-analytics-mcp-server"
+      }
+    }
+  }

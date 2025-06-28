@@ -1,0 +1,26 @@
+# ================================
+# docker-compose.override.yml (Development overrides)
+# ================================
+
+version: '3.8'
+
+services:
+  steam-mcp:
+    build:
+      target: development
+    volumes:
+      - .:/app:rw
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - LOG_LEVEL=debug
+    command: ["npm", "run", "dev"]
+    
+  # Disable monitoring in development
+  prometheus:
+    profiles:
+      - monitoring
+      
+  grafana:
+    profiles:
+      - monitoring

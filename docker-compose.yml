@@ -1,0 +1,159 @@
+# Docker Compose for MCP Server Stack
+# Orchestrates multiple MCP servers including Steam Analytics
+
+version: '3.8'
+
+services:
+  # Steam Analytics MCP Server
+  steam-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: steam-analytics-mcp
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - STEAM_API_KEY=${STEAM_API_KEY}
+      - STEAM_RATE_LIMIT=${STEAM_RATE_LIMIT:-100}
+      - STEAM_BURST_LIMIT=${STEAM_BURST_LIMIT:-10}
+    volumes:
+      - ./logs:/app/logs:rw
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "mcp.service=steam-analytics"
+      - "mcp.version=1.0.0"
+
+  # Example: File System MCP Server (add your other MCP tools here)
+  # filesystem-mcp:
+  #   image: mcp/filesystem-server:latest
+  #   container_name: filesystem-mcp
+  #   environment:
+  #     - NODE_ENV=production
+  #     - LOG_LEVEL=${LOG_LEVEL:-info}
+  #   volumes:
+  #     - ./data:/data:rw
+  #     - ./logs:/app/logs:rw
+  #   restart: unless-stopped
+  #   networks:
+  #     - mcp-network
+  #   labels:
+  #     - "mcp.service=filesystem"
+
+  # Example: Database MCP Server
+  # database-mcp:
+  #   image: mcp/database-server:latest
+  #   container_name: database-mcp
+  #   environment:
+  #     - NODE_ENV=production
+  #     - DATABASE_URL=${DATABASE_URL}
+  #   volumes:
+  #     - ./logs:/app/logs:rw
+  #   restart: unless-stopped
+  #   networks:
+  #     - mcp-network
+  #   depends_on:
+  #     - postgres
+  #   labels:
+  #     - "mcp.service=database"
+
+  # Example: Supporting PostgreSQL database
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: mcp-postgres
+  #   environment:
+  #     - POSTGRES_DB=mcptools
+  #     - POSTGRES_USER=${POSTGRES_USER:-mcpuser}
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #     - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+  #   restart: unless-stopped
+  #   networks:
+  #     - mcp-network
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcpuser}"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+
+  # MCP Gateway/Orchestrator (optional)
+  mcp-gateway:
+    image: nginx:alpine
+    container_name: mcp-gateway
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs:/var/log/nginx:rw
+    depends_on:
+      - steam-mcp
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    labels:
+      - "mcp.service=gateway"
+
+  # Monitoring and Observability
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mcp-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    labels:
+      - "mcp.service=monitoring"
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mcp-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    labels:
+      - "mcp.service=dashboard"
+
+networks:
+  mcp-network:
+    driver: bridge
+    name: mcp-network
+
+volumes:
+  postgres_data:
+    name: mcp-postgres-data
+  prometheus_data:
+    name: mcp-prometheus-data
+  grafana_data:
+    name: mcp-grafana-data
