@@ -30,61 +30,12 @@ services:
     labels:
       - "mcp.service=steam-analytics"
       - "mcp.version=1.0.0"
+      - "monitoring.container_group=mcp"
+      - "monitoring.service_name=steam-analytics"
+      - "monitoring.service_type=mcp-server"
+      - "prometheus.scrape=true"
 
-  # Example: File System MCP Server (add your other MCP tools here)
-  # filesystem-mcp:
-  #   image: mcp/filesystem-server:latest
-  #   container_name: filesystem-mcp
-  #   environment:
-  #     - NODE_ENV=production
-  #     - LOG_LEVEL=${LOG_LEVEL:-info}
-  #   volumes:
-  #     - ./data:/data:rw
-  #     - ./logs:/app/logs:rw
-  #   restart: unless-stopped
-  #   networks:
-  #     - mcp-network
-  #   labels:
-  #     - "mcp.service=filesystem"
-
-  # Example: Database MCP Server
-  # database-mcp:
-  #   image: mcp/database-server:latest
-  #   container_name: database-mcp
-  #   environment:
-  #     - NODE_ENV=production
-  #     - DATABASE_URL=${DATABASE_URL}
-  #   volumes:
-  #     - ./logs:/app/logs:rw
-  #   restart: unless-stopped
-  #   networks:
-  #     - mcp-network
-  #   depends_on:
-  #     - postgres
-  #   labels:
-  #     - "mcp.service=database"
-
-  # Example: Supporting PostgreSQL database
-  # postgres:
-  #   image: postgres:15-alpine
-  #   container_name: mcp-postgres
-  #   environment:
-  #     - POSTGRES_DB=mcptools
-  #     - POSTGRES_USER=${POSTGRES_USER:-mcpuser}
-  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
-  #     - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-  #   restart: unless-stopped
-  #   networks:
-  #     - mcp-network
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcpuser}"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 5
-
-  # MCP Gateway/Orchestrator (optional)
+  # MCP Gateway/Orchestrator
   mcp-gateway:
     image: nginx:alpine
     container_name: mcp-gateway
@@ -93,22 +44,70 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./logs:/var/log/nginx:rw
-    depends_on:
-      - steam-mcp
     restart: unless-stopped
     networks:
       - mcp-network
     labels:
       - "mcp.service=gateway"
+      - "monitoring.container_group=mcp"
+      - "monitoring.service_name=gateway"
+      - "monitoring.service_type=proxy"
+      - "prometheus.scrape=true"
 
-  # Monitoring and Observability
+  # Container monitoring
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: mcp-cadvisor
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    labels:
+      - "monitoring.container_group=monitoring"
+      - "monitoring.service_name=cadvisor"
+      - "monitoring.service_type=metrics-collector"
+      - "prometheus.scrape=true"
+
+  # System monitoring
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: mcp-node-exporter
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    labels:
+      - "monitoring.container_group=monitoring"
+      - "monitoring.service_name=node-exporter"
+      - "monitoring.service_type=system-metrics"
+      - "prometheus.scrape=true"
+
+  # Prometheus
   prometheus:
     image: prom/prometheus:latest
     container_name: mcp-prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -120,10 +119,16 @@ services:
     restart: unless-stopped
     networks:
       - mcp-network
+    depends_on:
+      - cadvisor
+      - node-exporter
     labels:
-      - "mcp.service=monitoring"
+      - "monitoring.container_group=monitoring"
+      - "monitoring.service_name=prometheus"
+      - "monitoring.service_type=metrics-storage"
+      - "prometheus.scrape=false"
 
-  # Grafana for dashboards
+  # Grafana with provisioning
   grafana:
     image: grafana/grafana:latest
     container_name: mcp-grafana
@@ -131,17 +136,40 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    restart: unless-stopped
+    networks:
+      - mcp-network
     depends_on:
       - prometheus
+    labels:
+      - "monitoring.container_group=monitoring"
+      - "monitoring.service_name=grafana"
+      - "monitoring.service_type=dashboard"
+      - "prometheus.scrape=false"
+
+  # Nginx Prometheus Exporter
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    container_name: mcp-nginx-exporter
+    ports:
+      - "9113:9113"
+    command:
+      - '-nginx.scrape-uri=http://mcp-gateway:80/nginx_status'
+    depends_on:
+      - mcp-gateway
     restart: unless-stopped
     networks:
       - mcp-network
     labels:
-      - "mcp.service=dashboard"
+      - "monitoring.container_group=monitoring"
+      - "monitoring.service_name=nginx-exporter"
+      - "monitoring.service_type=metrics-exporter"
+      - "prometheus.scrape=true"
 
 networks:
   mcp-network:
@@ -149,8 +177,6 @@ networks:
     name: mcp-network
 
 volumes:
-  postgres_data:
-    name: mcp-postgres-data
   prometheus_data:
     name: mcp-prometheus-data
   grafana_data:

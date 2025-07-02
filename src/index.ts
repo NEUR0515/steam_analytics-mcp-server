@@ -63,6 +63,25 @@ interface GameRecommendationsArgs {
   maxRecommendations?: number;
 }
 
+// Group gaming interfaces
+interface GroupCompatibilityArgs {
+  steamIds: string[];
+  includeDetails?: boolean;
+}
+
+interface FindCommonGamesArgs {
+  steamIds: string[];
+  minOwnedBy?: number;
+}
+
+interface GroupAnalysisArgs {
+  steamIds: string[];
+  groupSize: number;
+  maxRecommendations?: number;
+  includeOwned?: boolean;
+  priceRange?: string;
+}
+
 // Rate Limiting Implementation
 class RateLimiter {
   private requests: number[] = [];
@@ -265,6 +284,227 @@ class GameAnalytics {
   }
 }
 
+// Group Gaming Analyzer
+class GroupGamingAnalyzer {
+  private steamClient: SteamAPIClient;
+
+  constructor(steamClient: SteamAPIClient) {
+    this.steamClient = steamClient;
+  }
+
+  async analyzeGroupCompatibility(steamIds: string[]) {
+    const playersData = await Promise.all(
+      steamIds.map(async (steamId) => {
+        const [player, games] = await Promise.all([
+          this.steamClient.getPlayerSummary(steamId),
+          this.steamClient.getOwnedGames(steamId)
+        ]);
+        const analysis = GameAnalytics.analyzePlaytime(games);
+        const categories = GameAnalytics.categorizeGames(games);
+        return { player, games, analysis, categories };
+      })
+    );
+
+    const groupProfile = this.analyzeGroupProfile(playersData);
+    const compatibilityScore = this.calculateCompatibilityScore(playersData);
+    
+    return {
+      groupProfile,
+      compatibilityScore,
+      players: playersData.map(p => p.player),
+      individualAnalysis: playersData.map(p => ({ player: p.player, analysis: p.analysis }))
+    };
+  }
+
+  async findCommonGames(steamIds: string[], minOwnedBy: number = 2) {
+    const playersGames = await Promise.all(
+      steamIds.map(steamId => this.steamClient.getOwnedGames(steamId))
+    );
+
+    const allGames = new Map<number, { game: GameStats, ownedBy: string[] }>();
+    
+    playersGames.forEach((games, playerIndex) => {
+      games.forEach(game => {
+        if (!allGames.has(game.appid)) {
+          allGames.set(game.appid, { game, ownedBy: [] });
+        }
+        allGames.get(game.appid)!.ownedBy.push(steamIds[playerIndex]);
+      });
+    });
+
+    const commonGames = Array.from(allGames.values())
+      .filter(entry => entry.ownedBy.length >= minOwnedBy)
+      .map(entry => ({
+        ...entry.game,
+        ownedBy: entry.ownedBy,
+        totalPlaytime: playersGames.reduce((sum, games, index) => {
+          if (entry.ownedBy.includes(steamIds[index])) {
+            const game = games.find(g => g.appid === entry.game.appid);
+            return sum + (game?.playtime_forever || 0);
+          }
+          return sum;
+        }, 0),
+        isMultiplayer: this.isMultiplayerGame(entry.game.name)
+      }))
+      .sort((a, b) => b.totalPlaytime - a.totalPlaytime);
+
+    return {
+      commonGames,
+      groupLibraryStats: {
+        totalPlayers: steamIds.length,
+        commonGamesCount: commonGames.length,
+        multiplayerGamesCount: commonGames.filter(g => g.isMultiplayer).length
+      }
+    };
+  }
+
+  async generateGroupRecommendations(steamIds: string[], groupSize: number, maxRecommendations: number = 10) {
+    const playersData = await Promise.all(
+      steamIds.map(async (steamId) => {
+        const [player, games] = await Promise.all([
+          this.steamClient.getPlayerSummary(steamId),
+          this.steamClient.getOwnedGames(steamId)
+        ]);
+        return { player, games };
+      })
+    );
+
+    const groupAnalysis = this.analyzeGroupDynamics(playersData);
+    const recommendations = this.generateRecommendations(playersData, groupAnalysis, maxRecommendations);
+    
+    return {
+      recommendations,
+      groupAnalysis
+    };
+  }
+
+  private analyzeGroupProfile(playersData: any[]) {
+    const totalPlayers = playersData.length;
+    const totalExperience = playersData.reduce((sum, p) => sum + p.analysis.totalHours, 0);
+    const averageExperience = Math.round(totalExperience / totalPlayers);
+    
+    const allGenres = playersData.flatMap(p => Object.keys(p.categories.categorized));
+    const genreCount = allGenres.reduce((acc, genre) => {
+      acc[genre] = (acc[genre] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+    
+    const commonGenres = Object.entries(genreCount)
+      .filter(([, count]) => count >= Math.ceil(totalPlayers / 2))
+      .map(([genre]) => genre);
+
+    const groupDynamics = this.determineGroupDynamics(playersData);
+    
+    return {
+      totalPlayers,
+      averageExperience,
+      commonGenres,
+      groupDynamics
+    };
+  }
+
+  private calculateCompatibilityScore(playersData: any[]): number {
+    if (playersData.length < 2) return 0;
+    
+    const experienceDiff = Math.max(...playersData.map(p => p.analysis.totalHours)) - 
+                          Math.min(...playersData.map(p => p.analysis.totalHours));
+    const experienceScore = Math.max(0, 100 - (experienceDiff / 100));
+    
+    const allGenres = playersData.flatMap(p => Object.keys(p.categories.categorized));
+    const uniqueGenres = new Set(allGenres).size;
+    const totalGenreInstances = allGenres.length;
+    const genreOverlap = totalGenreInstances > 0 ? (totalGenreInstances - uniqueGenres) / totalGenreInstances * 100 : 0;
+    
+    return Math.round((experienceScore * 0.4 + genreOverlap * 0.6));
+  }
+
+  private analyzeGroupDynamics(playersData: any[]) {
+    const experienceLevels = playersData.map(p => {
+      const totalHours = p.games.reduce((sum: number, game: GameStats) => sum + game.playtime_forever, 0) / 60;
+      if (totalHours < 100) return 'casual';
+      if (totalHours < 1000) return 'regular';
+      return 'hardcore';
+    });
+
+    const casualCount = experienceLevels.filter(level => level === 'casual').length;
+    const regularCount = experienceLevels.filter(level => level === 'regular').length;
+    const hardcoreCount = experienceLevels.filter(level => level === 'hardcore').length;
+
+    let groupType = 'mixed';
+    if (casualCount === playersData.length) groupType = 'casual';
+    else if (hardcoreCount === playersData.length) groupType = 'hardcore';
+    else if (regularCount >= playersData.length / 2) groupType = 'regular';
+
+    const recommendedGenres = this.getRecommendedGenres(groupType);
+    
+    return {
+      groupType,
+      experienceDistribution: { casual: casualCount, regular: regularCount, hardcore: hardcoreCount },
+      recommendedGenres
+    };
+  }
+
+  private generateRecommendations(playersData: any[], groupAnalysis: any, maxRecommendations: number) {
+    // Simulated recommendation logic
+    const baseRecommendations = [
+      { name: 'Among Us', compatibilityScore: 95, price: 5, genres: ['Casual', 'Social'] },
+      { name: 'Fall Guys', compatibilityScore: 90, price: 0, genres: ['Casual', 'Party'] },
+      { name: 'Rocket League', compatibilityScore: 85, price: 0, genres: ['Sports', 'Competitive'] },
+      { name: 'Left 4 Dead 2', compatibilityScore: 88, price: 10, genres: ['Co-op', 'Action'] },
+      { name: 'Overwatch 2', compatibilityScore: 82, price: 0, genres: ['FPS', 'Competitive'] },
+      { name: 'Minecraft', compatibilityScore: 92, price: 27, genres: ['Sandbox', 'Creative'] },
+      { name: 'Portal 2', compatibilityScore: 89, price: 10, genres: ['Puzzle', 'Co-op'] },
+      { name: 'Stardew Valley', compatibilityScore: 87, price: 15, genres: ['Simulation', 'Relaxing'] },
+      { name: 'Deep Rock Galactic', compatibilityScore: 86, price: 30, genres: ['Co-op', 'FPS'] },
+      { name: 'It Takes Two', compatibilityScore: 94, price: 40, genres: ['Co-op', 'Adventure'] }
+    ];
+
+    // Filter and sort based on group analysis
+    const filteredRecommendations = baseRecommendations
+      .filter(game => {
+        if (groupAnalysis.groupType === 'casual') {
+          return game.genres.some(genre => ['Casual', 'Party', 'Social'].includes(genre));
+        } else if (groupAnalysis.groupType === 'hardcore') {
+          return game.genres.some(genre => ['Competitive', 'FPS', 'Strategy'].includes(genre));
+        }
+        return true; // Include all for mixed/regular groups
+      })
+      .sort((a, b) => b.compatibilityScore - a.compatibilityScore)
+      .slice(0, maxRecommendations);
+
+    return filteredRecommendations;
+  }
+
+  private determineGroupDynamics(playersData: any[]): string {
+    const avgHours = playersData.reduce((sum, p) => sum + p.analysis.totalHours, 0) / playersData.length;
+    
+    if (avgHours < 500) return 'Casual Gaming Group';
+    if (avgHours < 2000) return 'Regular Gaming Group';
+    return 'Hardcore Gaming Group';
+  }
+
+  private getRecommendedGenres(groupType: string): string[] {
+    switch (groupType) {
+      case 'casual': return ['Party Games', 'Casual', 'Social'];
+      case 'hardcore': return ['Competitive', 'Strategy', 'Complex'];
+      case 'regular': return ['Co-op', 'Multiplayer', 'Adventure'];
+      default: return ['Multiplayer', 'Co-op', 'Social'];
+    }
+  }
+
+  private isMultiplayerGame(gameName: string): boolean {
+    const multiplayerKeywords = [
+      'multiplayer', 'online', 'co-op', 'versus', 'battle', 'arena', 'team',
+      'among us', 'fall guys', 'rocket league', 'overwatch', 'valorant',
+      'counter-strike', 'dota', 'league of legends', 'fortnite', 'apex'
+    ];
+    
+    return multiplayerKeywords.some(keyword => 
+      gameName.toLowerCase().includes(keyword)
+    );
+  }
+}
+
 // Input validation functions
 function validatePlayerSummaryArgs(args: unknown): PlayerSummaryArgs {
   if (!args || typeof args !== 'object') {
@@ -311,10 +551,66 @@ function validateGameRecommendationsArgs(args: unknown): Required<GameRecommenda
   };
 }
 
+// Validation functions for new group gaming tools
+function validateGroupCompatibilityArgs(args: unknown): Required<GroupCompatibilityArgs> {
+  if (!args || typeof args !== 'object') {
+    throw new McpError(ErrorCode.InvalidParams, 'Arguments must be an object');
+  }
+  
+  const argsObj = args as Record<string, unknown>;
+  
+  if (!Array.isArray(argsObj.steamIds) || argsObj.steamIds.length < 2) {
+    throw new McpError(ErrorCode.InvalidParams, 'steamIds must be an array with at least 2 Steam IDs');
+  }
+  
+  return {
+    steamIds: argsObj.steamIds as string[],
+    includeDetails: typeof argsObj.includeDetails === 'boolean' ? argsObj.includeDetails : false
+  };
+}
+
+function validateFindCommonGamesArgs(args: unknown): Required<FindCommonGamesArgs> {
+  if (!args || typeof args !== 'object') {
+    throw new McpError(ErrorCode.InvalidParams, 'Arguments must be an object');
+  }
+  
+  const argsObj = args as Record<string, unknown>;
+  
+  if (!Array.isArray(argsObj.steamIds) || argsObj.steamIds.length < 2) {
+    throw new McpError(ErrorCode.InvalidParams, 'steamIds must be an array with at least 2 Steam IDs');
+  }
+  
+  return {
+    steamIds: argsObj.steamIds as string[],
+    minOwnedBy: typeof argsObj.minOwnedBy === 'number' ? argsObj.minOwnedBy : 2
+  };
+}
+
+function validateGroupRecommendationsArgs(args: unknown): Required<GroupAnalysisArgs> {
+  if (!args || typeof args !== 'object') {
+    throw new McpError(ErrorCode.InvalidParams, 'Arguments must be an object');
+  }
+  
+  const argsObj = args as Record<string, unknown>;
+  
+  if (!Array.isArray(argsObj.steamIds) || argsObj.steamIds.length < 2) {
+    throw new McpError(ErrorCode.InvalidParams, 'steamIds must be an array with at least 2 Steam IDs');
+  }
+  
+  return {
+    steamIds: argsObj.steamIds as string[],
+    groupSize: argsObj.steamIds.length,
+    maxRecommendations: typeof argsObj.maxRecommendations === 'number' ? argsObj.maxRecommendations : 10,
+    includeOwned: typeof argsObj.includeOwned === 'boolean' ? argsObj.includeOwned : true,
+    priceRange: typeof argsObj.priceRange === 'string' ? argsObj.priceRange as any : 'any'
+  };
+}
+
 // MCP Server Implementation
 class SteamMCPServer {
   private server: Server;
   private steamClient: SteamAPIClient;
+  private groupAnalyzer: GroupGamingAnalyzer;
 
   constructor(config: SteamConfig) {
     // Fixed: Server constructor now takes only one argument
@@ -324,6 +620,7 @@ class SteamMCPServer {
     });
 
     this.steamClient = new SteamAPIClient(config);
+    this.groupAnalyzer = new GroupGamingAnalyzer(this.steamClient);
     this.setupToolHandlers();
   }
 
@@ -383,6 +680,86 @@ class SteamMCPServer {
               required: ['steamId'],
             },
           },
+          {
+            name: 'analyze_group_compatibility',
+            description: 'Analyze gaming compatibility for a group of Steam users',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                steamIds: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of Steam IDs (64-bit) to analyze',
+                  minItems: 2,
+                  maxItems: 10
+                },
+                includeDetails: {
+                  type: 'boolean',
+                  description: 'Include detailed compatibility analysis',
+                  default: false
+                }
+              },
+              required: ['steamIds']
+            }
+          },
+          {
+            name: 'find_common_games',
+            description: 'Find games that multiple players in a group already own',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                steamIds: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of Steam IDs to check game libraries',
+                  minItems: 2,
+                  maxItems: 10
+                },
+                minOwnedBy: {
+                  type: 'number',
+                  description: 'Minimum number of players who must own the game',
+                  default: 2,
+                  minimum: 1
+                }
+              },
+              required: ['steamIds']
+            }
+          },
+          {
+            name: 'generate_group_recommendations',
+            description: 'Generate multiplayer game recommendations for a group',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                steamIds: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of Steam IDs for group analysis',
+                  minItems: 2,
+                  maxItems: 10
+                },
+                maxRecommendations: {
+                  type: 'number',
+                  description: 'Maximum number of game recommendations',
+                  default: 10,
+                  minimum: 1,
+                  maximum: 20
+                },
+                priceRange: {
+                  type: 'string',
+                  enum: ['free', 'under10', 'under20', 'under50', 'any'],
+                  description: 'Price range filter for recommendations',
+                  default: 'any'
+                },
+                includeOwned: {
+                  type: 'boolean',
+                  description: 'Include games some players already own',
+                  default: true
+                }
+              },
+              required: ['steamIds']
+            }
+          },
         ],
       };
     });
@@ -408,6 +785,29 @@ class SteamMCPServer {
             return await this.handleGetGameRecommendations(
               recommendArgs.steamId,
               recommendArgs.maxRecommendations
+            );
+          
+          case 'analyze_group_compatibility':
+            const compatibilityArgs = validateGroupCompatibilityArgs(args);
+            return await this.handleAnalyzeGroupCompatibility(
+              compatibilityArgs.steamIds,
+              compatibilityArgs.includeDetails
+            );
+          
+          case 'find_common_games':
+            const commonGamesArgs = validateFindCommonGamesArgs(args);
+            return await this.handleFindCommonGames(
+              commonGamesArgs.steamIds,
+              commonGamesArgs.minOwnedBy
+            );
+          
+          case 'generate_group_recommendations':
+            const recommendationsArgs = validateGroupRecommendationsArgs(args);
+            return await this.handleGenerateGroupRecommendations(
+              recommendationsArgs.steamIds,
+              recommendationsArgs.maxRecommendations,
+              recommendationsArgs.priceRange,
+              recommendationsArgs.includeOwned
             );
           
           default:
@@ -543,6 +943,182 @@ class SteamMCPServer {
 
   private generateRecommendationReasoning(analysis: any, categories: any): string {
     return `Based on ${analysis.totalHours} hours of gaming across ${analysis.playedGames} games, with preferences toward ${Object.keys(categories.categorized).join(', ')} genres.`;
+  }
+
+  // Handler methods for new group gaming tools
+  private async handleAnalyzeGroupCompatibility(steamIds: string[], includeDetails: boolean) {
+    const analysis = await this.groupAnalyzer.analyzeGroupCompatibility(steamIds);
+    
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            groupCompatibility: analysis,
+            summary: this.generateGroupSummary(analysis),
+            ...(includeDetails && { detailedAnalysis: analysis })
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  private async handleFindCommonGames(steamIds: string[], minOwnedBy: number) {
+    const commonGames = await this.groupAnalyzer.findCommonGames(steamIds, minOwnedBy);
+    
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            commonGames: commonGames.commonGames.slice(0, 20), // Limit for readability
+            libraryStats: commonGames.groupLibraryStats,
+            multiplayerGames: commonGames.commonGames.filter(game => game.isMultiplayer),
+            recommendations: this.generatePlayNowRecommendations(commonGames.commonGames)
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  private async handleGenerateGroupRecommendations(
+    steamIds: string[], 
+    maxRecommendations: number,
+    priceRange: string,
+    includeOwned: boolean
+  ) {
+    const recommendations = await this.groupAnalyzer.generateGroupRecommendations(
+      steamIds, 
+      steamIds.length, 
+      maxRecommendations
+    );
+    
+    // Filter by price range if specified
+    let filteredRecommendations = recommendations.recommendations;
+    if (priceRange !== 'any') {
+      filteredRecommendations = this.filterByPriceRange(recommendations.recommendations, priceRange);
+    }
+    
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            groupRecommendations: filteredRecommendations,
+            groupAnalysis: recommendations.groupAnalysis,
+            playNowOptions: this.identifyPlayNowOptions(filteredRecommendations),
+            budgetFriendly: filteredRecommendations.filter(game => game.price < 20),
+            summary: this.generateRecommendationSummary(filteredRecommendations, recommendations.groupAnalysis)
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  // Helper methods for group analysis
+  private generateGroupSummary(analysis: any): string {
+    const insights = [];
+    
+    insights.push(`Group Analysis for ${analysis.groupProfile.totalPlayers} players:`);
+    insights.push(`• Compatibility Score: ${analysis.compatibilityScore}%`);
+    insights.push(`• Average Experience: ${analysis.groupProfile.averageExperience} hours`);
+    insights.push(`• Common Genres: ${analysis.groupProfile.commonGenres.join(', ') || 'None identified'}`);
+    insights.push(`• Group Type: ${analysis.groupProfile.groupDynamics}`);
+    
+    if (analysis.compatibilityScore > 80) {
+      insights.push('• Recommendation: This group has excellent compatibility for multiplayer gaming');
+    } else if (analysis.compatibilityScore > 60) {
+      insights.push('• Recommendation: Good group chemistry - focus on games that bridge preferences');
+    } else {
+      insights.push('• Recommendation: Consider games with broad appeal or role diversity');
+    }
+    
+    return insights.join('\n');
+  }
+
+  private generatePlayNowRecommendations(commonGames: any[]): string[] {
+    const recommendations = [];
+    
+    const multiplayerGames = commonGames
+      .filter(game => game.isMultiplayer)
+      .sort((a, b) => b.totalPlaytime - a.totalPlaytime)
+      .slice(0, 5);
+    
+    if (multiplayerGames.length > 0) {
+      recommendations.push(`Play Now: ${multiplayerGames[0].name} (owned by ${multiplayerGames[0].ownedBy.length} players)`);
+    }
+    
+    const coopGames = commonGames.filter(game => 
+      game.name.toLowerCase().includes('co-op') || 
+      game.name.toLowerCase().includes('cooperative')
+    );
+    
+    if (coopGames.length > 0) {
+      recommendations.push(`Co-op Option: ${coopGames[0].name}`);
+    }
+    
+    return recommendations;
+  }
+
+  private identifyPlayNowOptions(recommendations: any[]): any[] {
+    return recommendations
+      .filter(game => {
+        // Games that are easy to get into immediately
+        const easyStart = game.genres.includes('Casual') || 
+                         game.name.toLowerCase().includes('party') ||
+                         game.compatibilityScore > 85;
+        
+        // Free or cheap games
+        const lowBarrier = game.price < 10;
+        
+        return easyStart || lowBarrier;
+      })
+      .slice(0, 3)
+      .map(game => ({
+        name: game.name,
+        reason: game.price === 0 ? 'Free to play' : 
+                game.compatibilityScore > 85 ? 'Perfect group match' : 
+                'Easy to get started',
+        compatibility: game.compatibilityScore,
+        price: game.price
+      }));
+  }
+
+  private filterByPriceRange(recommendations: any[], priceRange: string): any[] {
+    const priceFilters = {
+      free: (price: number) => price === 0,
+      under10: (price: number) => price < 10,
+      under20: (price: number) => price < 20,
+      under50: (price: number) => price < 50,
+      any: () => true
+    };
+    
+    const filter = priceFilters[priceRange as keyof typeof priceFilters] || priceFilters.any;
+    return recommendations.filter(game => filter(game.price));
+  }
+
+  private generateRecommendationSummary(recommendations: any[], groupAnalysis: any): string {
+    const insights = [];
+    
+    if (recommendations.length === 0) {
+      return 'No suitable recommendations found for this group. Consider expanding search criteria.';
+    }
+    
+    const topGame = recommendations[0];
+    insights.push(`Top Recommendation: ${topGame.name} (${topGame.compatibilityScore}% match)`);
+    
+    const freeGames = recommendations.filter(game => game.price === 0).length;
+    if (freeGames > 0) {
+      insights.push(`Free Options: ${freeGames} free-to-play games available`);
+    }
+    
+    const avgCompatibility = recommendations.reduce((sum, game) => sum + game.compatibilityScore, 0) / recommendations.length;
+    insights.push(`Average Compatibility: ${Math.round(avgCompatibility)}%`);
+    
+    insights.push(`Group Type: ${groupAnalysis.groupType}`);
+    insights.push(`Recommended Focus: ${groupAnalysis.recommendedGenres.join(', ')}`);
+    
+    return insights.join('\n');
   }
 
   async run() {
